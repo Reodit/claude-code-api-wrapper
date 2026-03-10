@@ -1,615 +1,256 @@
 # Claude Code API Wrapper
 
-Claude Code CLI를 HTTP API로 래핑하여 웹 애플리케이션에서 사용할 수 있게 해주는 Next.js 프로젝트입니다.
+Claude Code, Gemini, Codex CLI를 HTTP API로 래핑하여 외부에서 호출할 수 있게 해주는 Next.js 프로젝트입니다.
 
 ## 왜 이 프로젝트를 만들었나?
 
-- **비용 절감**: Anthropic API 직접 호출 대신 Claude Code 구독으로 무제한 사용
-- **도구 활용**: WebSearch, WebFetch 등 Claude Code의 내장 도구 사용 가능
-- **에이전트 시스템**: 서브에이전트를 통한 전문화된 분석
+- **비용 절감**: API 직접 호출 대신 각 서비스 구독으로 사용 (별도 API 비용 없음)
+- **멀티 프로바이더**: Claude, Gemini, Codex 3개 AI를 동일한 인터페이스로 사용
+- **파일 처리**: 이미지, PDF, Excel, Word, PPT 파일을 base64로 첨부 가능
+- **도구 활용**: 각 CLI의 내장 도구 및 스킬 자동 활용
 
-## 사전 요구사항
+## 빠른 시작
 
-### 0. 기본 환경 설정 (처음 시작하는 경우)
-
-**Node.js 설치 확인**
-```bash
-node --version
-npm --version
-```
-
-**Node.js가 없다면 설치:**
-
-<details>
-<summary>macOS</summary>
+### 1. 클론 및 설치
 
 ```bash
-# Homebrew 설치 (없을 경우)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Node.js 설치
-brew install node
+git clone https://github.com/Reodit/claude-code-api-wrapper.git
+cd claude-code-api-wrapper
+bash setup.sh
 ```
-</details>
 
-<details>
-<summary>Linux (Ubuntu/Debian)</summary>
+`setup.sh` 하나로 아래가 전부 설치됩니다:
+- npm 의존성
+- CLI 3개 (Claude Code, Gemini, Codex)
+- 오피스 스킬 (PDF, Excel, Word, PPT) - 전체 CLI 공유
+- Python 라이브러리 (openpyxl, python-docx 등)
+
+### 2. CLI 인증 (각각 한번만)
 
 ```bash
-# Node.js 20.x 설치
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
+claude    # Anthropic 계정 (브라우저 로그인)
+gemini    # Google 계정 (브라우저 로그인)
+codex     # ChatGPT 계정 (Plus 구독 필요)
 ```
-</details>
 
-<details>
-<summary>Windows</summary>
-
-[Node.js 공식 사이트](https://nodejs.org/)에서 LTS 버전 다운로드 및 설치
-</details>
-
-**Git 설치 확인 및 설치**
+다른 계정으로 전환하려면:
 ```bash
-# 확인
-git --version
+# Claude
+claude /logout && claude
 
-# macOS: 없다면 자동 설치 프롬프트
-# Linux: sudo apt-get install git
-# Windows: https://git-scm.com/download/win
+# Gemini
+rm ~/.gemini/oauth_creds.json && gemini
+
+# Codex
+rm ~/.codex/auth.json && codex
 ```
 
-### 1. Claude Code CLI 설치
+### 3. 서버 실행
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-**설치 확인:**
-```bash
-claude --version
-# 출력 예시: 2.0.21
-```
-
-**문제 발생 시:**
-- 권한 오류: `sudo npm install -g @anthropic-ai/claude-code`
-- 경로 오류: `~/.npm-global/bin`을 PATH에 추가
-
-### 2. 최초 인증
-
-```bash
-# 터미널에서 실행
-claude
-```
-
-**인증 과정:**
-1. 터미널에서 `claude` 명령어 실행
-2. 브라우저가 자동으로 열림
-3. Anthropic 계정으로 로그인 (없으면 가입)
-4. "Authorize" 버튼 클릭
-5. 터미널로 돌아가면 인증 완료
-
-**브라우저가 안 열린다면:**
-```bash
-# 수동으로 URL 복사해서 브라우저에 붙여넣기
-claude --auth
-```
-
-### 3. 인증 확인
-
-```bash
-# 간단한 테스트
-claude --print "hello"
-```
-
-**성공 시 출력:**
-```
-Hello! How can I help you today?
-```
-
-**실패 시:**
-- `~/.claude` 폴더 확인: `ls -la ~/.claude`
-- 재인증: `claude` 명령어 다시 실행
-- 로그 확인: `claude --verbose --print "test"`
-
-## 설치 및 실행
-
-```bash
-# 의존성 설치
-npm install
-
-# 개발 서버 실행
 npm run dev
-
-# 웹 브라우저에서 http://localhost:3000 접속
 ```
 
-## 웹 UI로 테스트하기
+`http://localhost:3000` 으로 접속하면 웹 UI도 사용 가능합니다.
 
-브라우저에서 `http://localhost:3000`을 열면 바로 사용할 수 있는 테스트 UI가 제공됩니다.
+## API 엔드포인트
 
-## HTTP API로 사용하기
+| 프로바이더 | Sync | Stream | 구독 |
+|-----------|------|--------|------|
+| Claude | `POST /api/claude` | `POST /api/claude/stream` | Claude Code 구독 |
+| Gemini | `POST /api/gemini` | `POST /api/gemini/stream` | 무료 (Google 계정) |
+| Codex | `POST /api/codex` | `POST /api/codex/stream` | ChatGPT Plus ($20/mo) |
 
-서버가 실행되면 어떤 언어에서든 HTTP API로 사용할 수 있습니다.
+각 엔드포인트의 `GET` 요청으로 API 문서를 확인할 수 있습니다.
 
-## 다양한 언어에서 사용하기
+## 사용 예시
 
-### cURL
+### 기본 텍스트 요청
 
 ```bash
-# 스트리밍 API
-curl -X POST http://localhost:3000/api/claude/stream \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "현재 미국 경제 상황 분석해줘"}' \
-  --no-buffer
-
-# 동기 API
+# Claude
 curl -X POST http://localhost:3000/api/claude \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "삼성전자 주가 분석해줘"}'
+  -d '{"prompt": "안녕하세요"}'
+
+# Gemini
+curl -X POST http://localhost:3000/api/gemini \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "안녕하세요"}'
+
+# Codex
+curl -X POST http://localhost:3000/api/codex \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "안녕하세요"}'
 ```
+
+### 스트리밍
+
+```bash
+curl -N -X POST http://localhost:3000/api/claude/stream \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "분석해줘"}' --no-buffer
+```
+
+### 파일 첨부 (base64)
+
+```bash
+# 이미지
+IMG_B64=$(base64 < photo.png)
+curl -X POST http://localhost:3000/api/claude \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\": \"이 이미지 설명해줘\", \"files\": [{\"filename\": \"photo.png\", \"data\": \"$IMG_B64\"}]}"
+
+# Excel
+EXCEL_B64=$(base64 < data.xlsx)
+curl -X POST http://localhost:3000/api/gemini \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\": \"매출 합계 알려줘\", \"files\": [{\"filename\": \"data.xlsx\", \"data\": \"$EXCEL_B64\"}]}"
+```
+
+지원 파일 형식: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.pdf`, `.xlsx`, `.xls`, `.docx`, `.doc`, `.pptx`, `.ppt`
 
 ### Python
 
 ```python
 import requests
-import json
 
-# 스트리밍 응답
-response = requests.post(
-    "http://localhost:3000/api/claude/stream",
-    json={"prompt": "거시경제 분석해줘"},
-    stream=True
-)
+# Sync
+res = requests.post("http://localhost:3000/api/claude", json={"prompt": "안녕"})
+print(res.json()["result"])
 
-for line in response.iter_lines():
+# Stream
+res = requests.post("http://localhost:3000/api/claude/stream", json={"prompt": "분석해줘"}, stream=True)
+for line in res.iter_lines():
     if line:
-        data = json.loads(line.decode('utf-8'))
-        if data['type'] == 'assistant':
-            print(data['message']['content'][0].get('text', ''))
-        elif data['type'] == 'result':
-            print(f"\n\n비용: ${data['total_cost_usd']:.4f}")
-
-# 동기 응답
-response = requests.post(
-    "http://localhost:3000/api/claude",
-    json={"prompt": "삼성전자 분석해줘"}
-)
-result = response.json()
-print(result['result'])
+        print(line.decode())
 ```
 
-### JavaScript/Node.js
+### JavaScript
 
 ```javascript
-// 스트리밍
-const response = await fetch('http://localhost:3000/api/claude/stream', {
+// Sync
+const res = await fetch('http://localhost:3000/api/gemini', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ prompt: '미국 경제 분석해줘' })
+  body: JSON.stringify({ prompt: '안녕하세요' })
 });
+const data = await res.json();
+console.log(data.result);
 
-const reader = response.body.getReader();
+// Stream
+const stream = await fetch('http://localhost:3000/api/gemini/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ prompt: '분석해줘' })
+});
+const reader = stream.body.getReader();
 const decoder = new TextDecoder();
-
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
-
-  const text = decoder.decode(value);
-  const lines = text.split('\n').filter(line => line.trim());
-
-  for (const line of lines) {
-    const msg = JSON.parse(line);
-    if (msg.type === 'assistant') {
-      console.log(msg.message.content[0]?.text);
-    }
-  }
-}
-
-// 동기
-const syncResponse = await fetch('http://localhost:3000/api/claude', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ prompt: '삼성전자 분석해줘' })
-});
-
-const data = await syncResponse.json();
-console.log(data.result);
-```
-
-### Go
-
-```go
-package main
-
-import (
-    "bufio"
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "net/http"
-)
-
-func main() {
-    // 스트리밍 요청
-    body := map[string]string{"prompt": "거시경제 분석해줘"}
-    jsonData, _ := json.Marshal(body)
-
-    resp, _ := http.Post(
-        "http://localhost:3000/api/claude/stream",
-        "application/json",
-        bytes.NewBuffer(jsonData),
-    )
-    defer resp.Body.Close()
-
-    scanner := bufio.NewScanner(resp.Body)
-    for scanner.Scan() {
-        var msg map[string]interface{}
-        json.Unmarshal(scanner.Bytes(), &msg)
-
-        if msg["type"] == "assistant" {
-            content := msg["message"].(map[string]interface{})["content"]
-            fmt.Println(content)
-        }
-    }
+  console.log(decoder.decode(value));
 }
 ```
-
-### Ruby
-
-```ruby
-require 'net/http'
-require 'json'
-require 'uri'
-
-# 동기 요청
-uri = URI('http://localhost:3000/api/claude')
-req = Net::HTTP::Post.new(uri, 'Content-Type' => 'application/json')
-req.body = { prompt: '삼성전자 분석해줘' }.to_json
-
-res = Net::HTTP.start(uri.hostname, uri.port) { |http| http.request(req) }
-result = JSON.parse(res.body)
-puts result['result']
-```
-
-## API 엔드포인트
-
-### POST /api/claude/stream (스트리밍)
-
-실시간 스트리밍 응답을 반환합니다.
-
-```javascript
-const response = await fetch('/api/claude/stream', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    prompt: '현재 미국 경제 상황 분석해줘'
-  })
-});
-
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-
-  const text = decoder.decode(value);
-  const lines = text.split('\n').filter(line => line.trim());
-
-  for (const line of lines) {
-    const msg = JSON.parse(line);
-    // msg.type: 'system' | 'assistant' | 'result' | 'stream_event'
-    console.log(msg);
-  }
-}
-```
-
-### POST /api/claude (동기)
-
-전체 응답을 대기 후 반환합니다.
-
-```javascript
-const response = await fetch('/api/claude', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    prompt: '삼성전자 주가 분석해줘'
-  })
-});
-
-const data = await response.json();
-console.log(data.result);
-```
-
-### GET /api/claude
-
-API 문서를 반환합니다.
 
 ## 요청 옵션
 
+### Claude
+
 | 옵션 | 타입 | 설명 |
 |------|------|------|
-| `prompt` | string | **필수**. 분석 요청 내용 |
-| `agents` | object | 커스텀 서브에이전트 추가 |
-| `useDefaultAgents` | boolean | 기본 에이전트 사용 여부 (기본값: true) |
+| `prompt` | string | **필수**. 요청 내용 |
+| `files` | FileAttachment[] | 첨부 파일 (base64) |
+| `agents` | object | 커스텀 서브에이전트 |
+| `useDefaultAgents` | boolean | 기본 에이전트 사용 (기본: true) |
 | `allowedTools` | string[] | 허용할 도구 목록 |
 | `disallowedTools` | string[] | 차단할 도구 목록 |
+| `systemPrompt` | string | 시스템 프롬프트 |
+| `appendSystemPrompt` | string | 시스템 프롬프트 추가 |
+| `mcpConfig` | object | MCP 서버 설정 |
+
+### Gemini
+
+| 옵션 | 타입 | 설명 |
+|------|------|------|
+| `prompt` | string | **필수**. 요청 내용 |
+| `files` | FileAttachment[] | 첨부 파일 (base64) |
+| `model` | string | 모델 (기본: gemini-2.5-pro) |
+| `yolo` | boolean | 도구 자동 승인 (기본: true) |
+
+### Codex
+
+| 옵션 | 타입 | 설명 |
+|------|------|------|
+| `prompt` | string | **필수**. 요청 내용 |
+| `files` | FileAttachment[] | 첨부 파일 (base64) |
+| `model` | string | 모델 |
+| `sandboxMode` | string | `read-only` \| `workspace-write` \| `danger-full-access` |
+
+### FileAttachment
+
+```typescript
+{
+  filename: string;   // "report.xlsx"
+  data: string;       // base64 인코딩된 파일 내용
+  mimeType?: string;  // "image/png" (선택)
+}
+```
 
 ## 프로젝트 구조
 
 ```
 .
-├── .claude/                        # Claude Code 설정
-│   ├── settings.json               # 팀 공유 설정
-│   ├── settings.local.json         # 개인 설정 (git 무시)
-│   └── skills/
-│       └── macro-analysis/         # 커스텀 스킬
-│           └── SKILL.md
-├── app/                            # Next.js App Router
+├── app/
 │   ├── api/
-│   │   └── claude/
-│   │       ├── route.ts            # 동기 API (/api/claude)
-│   │       └── stream/
-│   │           └── route.ts        # 스트리밍 API (/api/claude/stream)
-│   ├── layout.tsx                  # Root layout
-│   ├── page.tsx                    # 웹 UI (테스트 인터페이스)
-│   └── globals.css                 # Tailwind CSS
-├── .gitignore
-├── next.config.ts                  # Next.js 설정
-├── package.json
-├── package-lock.json
-├── postcss.config.mjs              # PostCSS 설정
-├── README.md                       # 프로젝트 문서
-├── tailwind.config.ts              # Tailwind CSS 설정
-├── TEST.md                         # 테스트 가이드
-└── tsconfig.json                   # TypeScript 설정
+│   │   ├── claude/
+│   │   │   ├── route.ts              # Claude 동기 API
+│   │   │   └── stream/route.ts       # Claude 스트리밍 API
+│   │   ├── gemini/
+│   │   │   ├── route.ts              # Gemini 동기 API
+│   │   │   └── stream/route.ts       # Gemini 스트리밍 API
+│   │   └── codex/
+│   │       ├── route.ts              # Codex 동기 API
+│   │       └── stream/route.ts       # Codex 스트리밍 API
+│   ├── page.tsx                      # 웹 UI
+│   └── layout.tsx
+├── lib/
+│   └── file-handler.ts              # 파일 업로드 처리
+├── .agents/skills/                   # 오피스 스킬 (전체 CLI 공유)
+│   ├── pdf/
+│   ├── xlsx/
+│   ├── docx/
+│   └── pptx/
+├── setup.sh                         # 원클릭 설치 스크립트
+└── README.md
 ```
 
----
+## 오피스 스킬
 
-## Claude Code 설정 가이드
+`setup.sh`가 PDF, Excel, Word, PPT 스킬을 3개 CLI 모두에 설치합니다. 파일을 첨부하면 AI가 자동으로 적절한 스킬을 선택해서 처리합니다.
 
-### 설정 파일 구조
-
-| 파일 | 위치 | 용도 | Git |
-|------|------|------|-----|
-| `settings.json` | `.claude/` | 팀 공유 설정 | ✅ 커밋 |
-| `settings.local.json` | `.claude/` | 개인 로컬 설정 | ❌ 무시 |
-
-### settings.json 예시
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:fred.stlouisfed.org)",
-      "Bash(npm:*)",
-      "WebSearch"
-    ],
-    "deny": [
-      "Bash(rm -rf:*)"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "WebSearch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo \"[WebSearch] $(date +%H:%M:%S): $CLAUDE_TOOL_INPUT\" >> /tmp/claude.log"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo \"파일 수정됨: $CLAUDE_TOOL_INPUT\" >> /tmp/claude.log"
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+# 수동 설치 시
+npx skills add anthropics/skills@pdf -a claude-code -y
+npx skills add anthropics/skills@pdf -a gemini-cli -y
+npx skills add anthropics/skills@pdf -a codex -y
 ```
 
-### Permissions (권한 설정)
+## 인증 상태 확인
 
-Claude Code가 도구를 사용할 때 자동 허용/거부 규칙:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:example.com)",    // 특정 도메인만 허용
-      "Bash(npm:*)",                     // npm 명령어 허용
-      "Bash(git:*)",                     // git 명령어 허용
-      "Read",                            // 파일 읽기 전체 허용
-      "WebSearch"                        // 웹 검색 허용
-    ],
-    "deny": [
-      "Bash(rm -rf:*)",                  // 위험한 명령어 차단
-      "Write(*.env)"                     // .env 파일 수정 차단
-    ]
-  }
-}
+```bash
+ls ~/.claude/credentials.json 2>/dev/null && echo "Claude: OK" || echo "Claude: 미인증"
+ls ~/.gemini/oauth_creds.json 2>/dev/null && echo "Gemini: OK" || echo "Gemini: 미인증"
+ls ~/.codex/auth.json 2>/dev/null && echo "Codex: OK" || echo "Codex: 미인증"
 ```
-
-### Hooks (훅 설정)
-
-도구 실행 전/후에 자동으로 명령어 실행:
-
-| 이벤트 | 설명 |
-|--------|------|
-| `PreToolUse` | 도구 실행 **전** |
-| `PostToolUse` | 도구 실행 **후** |
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "WebSearch",          // WebSearch 도구에만 적용
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo 검색 시작 >> /tmp/log.txt"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**환경 변수:**
-- `$CLAUDE_TOOL_INPUT` - 도구 입력값
-- `$CLAUDE_TOOL_NAME` - 도구 이름
-- `$CLAUDE_SESSION_ID` - 세션 ID
-
----
-
-## Skills (스킬)
-
-스킬은 특정 키워드나 상황에서 Claude가 참조하는 가이드라인입니다.
-
-### 스킬 생성
-
-`.claude/skills/<skill-name>/SKILL.md` 파일 생성:
-
-```markdown
-# 거시경제 분석 스킬
-
-## 트리거
-- "거시경제", "금리", "인플레이션", "GDP" 키워드
-
-## 분석 항목
-1. **성장**: GDP, PMI
-2. **물가**: CPI, PCE
-3. **고용**: 실업률, NFP
-4. **금리**: 기준금리, 10년물 금리
-
-## 출력 형식
-| 지표 | 수치 | 평가 |
-|------|------|------|
-
-면책: 정보 제공 목적이며 투자 조언 아님
-```
-
-### 스킬 구조
-
-```
-.claude/skills/
-├── macro-analysis/
-│   └── SKILL.md           # 거시경제 분석
-├── stock-analysis/
-│   └── SKILL.md           # 주식 분석
-└── code-review/
-    └── SKILL.md           # 코드 리뷰
-```
-
----
-
-## Subagents (서브에이전트)
-
-API에서 커스텀 서브에이전트 추가:
-
-```javascript
-fetch('/api/claude/stream', {
-  method: 'POST',
-  body: JSON.stringify({
-    prompt: '최신 AI 뉴스 요약해줘',
-    agents: {
-      'news-researcher': {
-        description: '뉴스 리서치 전문가',
-        prompt: '최신 뉴스를 검색하고 핵심만 요약하세요.',
-        tools: ['WebSearch', 'WebFetch'],
-        model: 'haiku'  // sonnet | opus | haiku
-      }
-    }
-  })
-});
-```
-
-### 기본 제공 에이전트
-
-**API 내장:**
-- `financial-analyst` - 금융/투자 분석 전문가
-
-**Claude Code 내장:**
-- `Explore` - 코드베이스 탐색 (읽기 전용)
-- `Plan` - 계획 모드 리서치
-- `general-purpose` - 범용 멀티스텝 작업
-
----
-
-## MCP 서버 (선택)
-
-외부 데이터 소스 연동 시 `route.ts`에서 설정:
-
-```typescript
-const MCP_SERVERS: MCPServer[] = [
-  // HTTP 방식
-  {
-    name: 'alphavantage',
-    transport: 'http',
-    url: 'https://mcp.alphavantage.co/mcp?apikey=YOUR_KEY',
-  },
-  // stdio 방식 (npx)
-  {
-    name: 'github',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-  },
-];
-```
-
-**참고:** WebSearch, WebFetch는 Claude Code 내장 도구이므로 MCP 없이 사용 가능.
-
----
-
-## 내장 도구 목록
-
-| 카테고리 | 도구 | 설명 |
-|----------|------|------|
-| 파일 | `Read`, `Edit`, `Write` | 파일 읽기/수정/생성 |
-| 검색 | `Glob`, `Grep`, `LS` | 패턴 매칭, 내용 검색 |
-| 실행 | `Bash` | 셸 명령어 실행 |
-| 웹 | `WebSearch`, `WebFetch` | 웹 검색, 페이지 가져오기 |
-| 작업 | `TodoRead`, `TodoWrite` | 작업 관리 |
-| 노트북 | `NotebookRead`, `NotebookEdit` | Jupyter 노트북 |
-
----
-
-## 스트리밍 메시지 타입
-
-```typescript
-interface StreamMessage {
-  type: 'system' | 'assistant' | 'user' | 'result' | 'stream_event';
-  subtype?: string;  // 'init' 등
-  message?: { content: Array<{ type: string; text?: string }> };
-  event?: { type: string; delta?: { text: string } };
-  result?: string;
-  duration_ms?: number;
-  total_cost_usd?: number;
-}
-```
-
----
 
 ## 주의사항
 
-- Claude Code CLI 설치 및 인증이 필수입니다 (`claude` 명령어로 로그인)
-- Claude Code 구독이 있어야 사용 가능합니다 (API 키 불필요)
+- 각 CLI 인증이 필수입니다 (브라우저 로그인)
+- Claude Code, Gemini는 구독만으로 사용 가능 (API 비용 없음)
+- Codex는 ChatGPT Plus 이상 구독 필요
 - `--dangerously-skip-permissions` 플래그를 사용하므로 신뢰할 수 있는 환경에서만 실행하세요
-- 타임아웃: 20분 (복잡한 분석 작업 고려)
-- **비용 절감**: Anthropic API 대신 Claude Code 구독을 사용하므로 별도 API 비용 없음
+- 파일 크기 제한: 50MB/파일, 100MB 전체
 
 ## 라이선스
 
