@@ -1,6 +1,14 @@
 import { NextRequest } from 'next/server';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import {
+  FileAttachment,
+  SavedFile,
+  validateFiles,
+  saveFilesToTemp,
+  buildFilePromptInstructions,
+  cleanupTempFiles,
+} from '@/lib/file-handler';
 
 interface MCPServer {
   name: string;
@@ -37,10 +45,25 @@ const DEFAULT_AGENTS: Record<string, CustomAgent> = {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { prompt, agents, useDefaultAgents = true } = body;
+  const { prompt, files, agents, useDefaultAgents = true } = body as {
+    prompt: string;
+    files?: FileAttachment[];
+    agents?: Record<string, CustomAgent>;
+    useDefaultAgents?: boolean;
+  };
 
   if (!prompt || typeof prompt !== 'string') {
     return new Response(JSON.stringify({ error: 'Prompt required' }), { status: 400 });
+  }
+
+  // 파일 첨부 처리
+  let savedFiles: SavedFile[] = [];
+  if (files && Array.isArray(files) && files.length > 0) {
+    const validationError = validateFiles(files);
+    if (validationError) {
+      return new Response(JSON.stringify({ error: validationError }), { status: 400 });
+    }
+    savedFiles = await saveFilesToTemp(files);
   }
 
   // Claude CLI 경로 감지
@@ -85,7 +108,14 @@ export async function POST(request: NextRequest) {
     args.push('--agents', JSON.stringify(mergedAgents));
   }
 
-  args.push(prompt);
+  // 파일 첨부 시 프롬프트에 파일 경로 및 처리 지시 추가
+  let augmentedPrompt = prompt;
+  if (savedFiles.length > 0) {
+    const fileInstructions = buildFilePromptInstructions(savedFiles);
+    augmentedPrompt = `${fileInstructions}\n\n${prompt}`;
+  }
+
+  args.push(augmentedPrompt);
 
   // ReadableStream으로 스트리밍 응답
   const stream = new ReadableStream({
@@ -104,6 +134,7 @@ export async function POST(request: NextRequest) {
           ...process.env,
           PATH: process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
           TERM: 'xterm-256color',
+          CLAUDECODE: '',  // 중첩 세션 방지 우회
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -142,6 +173,9 @@ export async function POST(request: NextRequest) {
           JSON.stringify({ type: 'error', message: 'Request timed out' }) + '\n'
         ));
         safeClose();
+        if (savedFiles.length > 0) {
+          cleanupTempFiles(savedFiles).catch(console.error);
+        }
       }, 1200000); // 20분 타임아웃
 
       child.on('close', (code) => {
@@ -163,6 +197,10 @@ export async function POST(request: NextRequest) {
           ));
         }
         safeClose();
+        // 임시 파일 정리
+        if (savedFiles.length > 0) {
+          cleanupTempFiles(savedFiles).catch(console.error);
+        }
       });
 
       child.on('error', (err) => {
@@ -171,6 +209,9 @@ export async function POST(request: NextRequest) {
           JSON.stringify({ type: 'error', message: err.message }) + '\n'
         ));
         safeClose();
+        if (savedFiles.length > 0) {
+          cleanupTempFiles(savedFiles).catch(console.error);
+        }
       });
     },
   });

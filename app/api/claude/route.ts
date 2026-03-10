@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import {
+  FileAttachment,
+  SavedFile,
+  validateFiles,
+  saveFilesToTemp,
+  buildFilePromptInstructions,
+  cleanupTempFiles,
+} from '@/lib/file-handler';
 
 // MCP 서버 설정 (예시 - 필요시 추가)
 // WebSearch는 Claude Code 내장 도구로 이미 사용 가능
@@ -138,19 +146,39 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const {
       prompt,
+      files,
       allowedTools,
       disallowedTools,
       systemPrompt,
       appendSystemPrompt,
       agents,
       useDefaultAgents = true,
-    } = body;
+    } = body as {
+      prompt: string;
+      files?: FileAttachment[];
+      allowedTools?: string[];
+      disallowedTools?: string[];
+      systemPrompt?: string;
+      appendSystemPrompt?: string;
+      agents?: Record<string, CustomAgent>;
+      useDefaultAgents?: boolean;
+    };
 
     if (!prompt || typeof prompt !== 'string') {
       return NextResponse.json(
         { error: 'Prompt is required and must be a string' },
         { status: 400 }
       );
+    }
+
+    // 파일 첨부 처리
+    let savedFiles: SavedFile[] = [];
+    if (files && Array.isArray(files) && files.length > 0) {
+      const validationError = validateFiles(files);
+      if (validationError) {
+        return NextResponse.json({ error: validationError }, { status: 400 });
+      }
+      savedFiles = await saveFilesToTemp(files);
     }
 
     // Claude CLI 경로 감지
@@ -230,10 +258,18 @@ export async function POST(request: NextRequest) {
       args.push('--agents', JSON.stringify(mergedAgents));
     }
 
-    args.push(prompt);
+    // 파일 첨부 시 프롬프트에 파일 경로 및 처리 지시 추가
+    let augmentedPrompt = prompt;
+    if (savedFiles.length > 0) {
+      const fileInstructions = buildFilePromptInstructions(savedFiles);
+      augmentedPrompt = `${fileInstructions}\n\n${prompt}`;
+    }
+
+    args.push(augmentedPrompt);
 
     console.log(`Executing Claude Code: ${claudePath} ${args.slice(0, -1).join(' ')}`);
 
+    try {
     // Execute Claude Code using spawn
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(claudePath, args, {
@@ -242,6 +278,7 @@ export async function POST(request: NextRequest) {
           ...process.env,
           PATH: process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
           TERM: 'xterm-256color',
+          CLAUDECODE: '',  // 중첩 세션 방지 우회
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -363,6 +400,13 @@ export async function POST(request: NextRequest) {
     };
 
     return NextResponse.json(response);
+
+    } finally {
+      // 임시 파일 정리
+      if (savedFiles.length > 0) {
+        await cleanupTempFiles(savedFiles);
+      }
+    }
   } catch (error: unknown) {
     console.error('Claude API error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -386,6 +430,7 @@ export async function GET() {
     usage: 'POST /api/claude with { "prompt": "your prompt here" }',
     options: {
       prompt: 'string (required) - The prompt to send to Claude',
+      files: 'FileAttachment[] (optional) - Attached files as base64. Each: { filename: string, data: string (base64), mimeType?: string }. Supported: .png, .jpg, .jpeg, .gif, .webp, .pdf, .xlsx, .xls, .docx, .doc, .pptx, .ppt',
       allowedTools: 'string[] (optional) - Tools to allow (e.g., ["WebSearch", "Read"])',
       disallowedTools: 'string[] (optional) - Tools to block (e.g., ["Edit", "Write"])',
       systemPrompt: 'string (optional) - Custom system prompt',
