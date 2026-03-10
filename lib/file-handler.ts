@@ -1,6 +1,6 @@
 import { mkdir, writeFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { randomUUID } from 'crypto';
 
 export interface FileAttachment {
@@ -71,13 +71,14 @@ export async function saveFilesToTemp(files: FileAttachment[]): Promise<SavedFil
 
   for (const file of files) {
     const buffer = Buffer.from(file.data, 'base64');
-    const tempPath = join(tempDir, file.filename);
+    const safeName = basename(file.filename);
+    const tempPath = join(tempDir, safeName);
     await writeFile(tempPath, buffer);
 
     savedFiles.push({
       tempPath,
-      originalName: file.filename,
-      extension: getExtension(file.filename),
+      originalName: safeName,
+      extension: getExtension(safeName),
     });
   }
 
