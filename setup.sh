@@ -68,12 +68,23 @@ fi
 
 echo ""
 echo "----------------------------------------"
-echo "  3. Anthropic 오피스 스킬 설치"
+echo "  3. 오피스 스킬 설치 (전체 CLI 공유)"
 echo "----------------------------------------"
-npx skills add anthropics/skills@pdf -y 2>/dev/null && echo "✅ PDF 스킬" || echo "⚠️  PDF 스킬 설치 실패"
-npx skills add anthropics/skills@xlsx -y 2>/dev/null && echo "✅ Excel 스킬" || echo "⚠️  Excel 스킬 설치 실패"
-npx skills add anthropics/skills@docx -y 2>/dev/null && echo "✅ Word 스킬" || echo "⚠️  Word 스킬 설치 실패"
-npx skills add anthropics/skills@pptx -y 2>/dev/null && echo "✅ PPT 스킬" || echo "⚠️  PPT 스킬 설치 실패"
+
+SKILLS=("anthropics/skills@pdf" "anthropics/skills@xlsx" "anthropics/skills@docx" "anthropics/skills@pptx")
+SKILL_NAMES=("PDF" "Excel" "Word" "PPT")
+AGENTS=("claude-code" "codex" "gemini-cli")
+
+for i in "${!SKILLS[@]}"; do
+  skill="${SKILLS[$i]}"
+  name="${SKILL_NAMES[$i]}"
+  echo "📦 ${name} 스킬 설치 중..."
+  for agent in "${AGENTS[@]}"; do
+    npx skills add "$skill" -a "$agent" -y 2>/dev/null \
+      && echo "   ✅ ${name} → ${agent}" \
+      || echo "   ⚠️  ${name} → ${agent} 설치 실패"
+  done
+done
 
 echo ""
 echo "----------------------------------------"

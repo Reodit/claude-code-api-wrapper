@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
       path === 'gemini' || existsSync(path)
     ) || 'gemini';
 
-    const args: string[] = [];
+    const args: string[] = ['--output-format', 'stream-json'];
 
     // 모델 설정
     if (model && typeof model === 'string') {
@@ -139,22 +139,55 @@ export async function POST(request: NextRequest) {
 
       const durationMs = Date.now() - startTime;
 
-      // Gemini CLI는 텍스트만 출력 — "Loaded cached credentials." 줄 제거
-      const resultText = output
-        .split('\n')
-        .filter(line => !line.startsWith('Loaded cached credentials'))
-        .join('\n')
-        .trim();
+      // stream-json JSONL 파싱
+      const lines = output.split('\n');
+      let resultText = '';
+      let sessionId = '';
+      let usedModel = model || '';
+      let stats: Record<string, unknown> = {};
+      let hasError = false;
+      let errorMessage = '';
+      const events: Record<string, unknown>[] = [];
+
+      for (const line of lines) {
+        if (!line.trim() || line.startsWith('Loaded cached credentials') || line.startsWith('Skill conflict')) continue;
+        try {
+          const parsed = JSON.parse(line);
+          events.push(parsed);
+
+          if (parsed.type === 'init') {
+            sessionId = parsed.session_id || '';
+            usedModel = parsed.model || usedModel;
+          }
+          if (parsed.type === 'message' && parsed.role === 'assistant') {
+            resultText += parsed.content || '';
+          }
+          if (parsed.type === 'result') {
+            stats = parsed.stats || {};
+            hasError = parsed.status !== 'success';
+          }
+          if (parsed.type === 'error') {
+            hasError = true;
+            errorMessage = parsed.message || parsed.content || '';
+          }
+        } catch {
+          // non-JSON line, skip
+        }
+      }
 
       return NextResponse.json({
-        success: true,
+        success: !hasError,
         provider: 'gemini',
-        result: resultText,
+        result: resultText.trim(),
+        events,
         metadata: {
-          model: model || 'gemini-2.5-pro',
+          session_id: sessionId,
+          model: usedModel || 'gemini-2.5-pro',
           duration_ms: durationMs,
-          cost_usd: 0, // Gemini CLI는 무료
+          stats,
+          cost_usd: 0,
         },
+        ...(hasError && { error: errorMessage }),
         raw_output: output,
       });
 
@@ -205,6 +238,6 @@ export async function GET() {
       model: 'string (optional, default: gemini-2.5-pro)',
       yolo: 'boolean (optional, default: true) - Auto-approve tool usage',
     },
-    note: 'Gemini CLI outputs plain text only. No JSON streaming or detailed metadata available.',
+    note: 'Uses Gemini CLI stream-json output format for structured responses.',
   });
 }

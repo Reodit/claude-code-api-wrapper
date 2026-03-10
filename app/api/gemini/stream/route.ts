@@ -13,8 +13,7 @@ import {
 /**
  * Gemini CLI Streaming API Wrapper
  *
- * Gemini CLI는 JSON 스트리밍을 지원하지 않으므로,
- * stdout 텍스트를 실시간으로 청크 단위로 전달합니다.
+ * Gemini CLI의 --output-format stream-json JSONL 출력을 그대로 스트리밍합니다.
  */
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -55,7 +54,7 @@ export async function POST(request: NextRequest) {
     path === 'gemini' || existsSync(path)
   ) || 'gemini';
 
-  const args: string[] = [];
+  const args: string[] = ['--output-format', 'stream-json'];
 
   if (model && typeof model === 'string') {
     args.push('-m', model);
@@ -72,8 +71,6 @@ export async function POST(request: NextRequest) {
   }
 
   args.push('-p', augmentedPrompt);
-
-  const startTime = Date.now();
 
   const stream = new ReadableStream({
     start(controller) {
@@ -98,29 +95,24 @@ export async function POST(request: NextRequest) {
 
       child.stdin.end();
 
-      let fullOutput = '';
-      let skippedCredLine = false;
+      let buffer = '';
 
       child.stdout.on('data', (data) => {
-        let text = data.toString();
+        buffer += data.toString();
 
-        // "Loaded cached credentials." 첫 줄 제거
-        if (!skippedCredLine) {
-          if (text.startsWith('Loaded cached credentials.')) {
-            text = text.replace('Loaded cached credentials.\n', '');
-            skippedCredLine = true;
-            if (!text) return;
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('Loaded cached credentials') || trimmed.startsWith('Skill conflict')) continue;
+          try {
+            JSON.parse(trimmed); // 유효성 검사
+            controller.enqueue(new TextEncoder().encode(trimmed + '\n'));
+          } catch {
+            // non-JSON line, skip
           }
         }
-
-        fullOutput += text;
-
-        // 텍스트 청크를 JSON 이벤트로 래핑하여 전송
-        const event = JSON.stringify({
-          type: 'text_delta',
-          text: text,
-        });
-        controller.enqueue(new TextEncoder().encode(event + '\n'));
       });
 
       child.stderr.on('data', (data) => {
@@ -141,21 +133,15 @@ export async function POST(request: NextRequest) {
       child.on('close', (code) => {
         clearTimeout(timeout);
 
-        const durationMs = Date.now() - startTime;
-
-        // 최종 결과 이벤트 전송
-        const resultEvent = JSON.stringify({
-          type: 'result',
-          provider: 'gemini',
-          success: code === 0,
-          result: fullOutput.trim(),
-          metadata: {
-            model: model || 'gemini-2.5-pro',
-            duration_ms: durationMs,
-            cost_usd: 0,
-          },
-        });
-        controller.enqueue(new TextEncoder().encode(resultEvent + '\n'));
+        // 버퍼에 남은 데이터 처리
+        if (buffer.trim()) {
+          try {
+            JSON.parse(buffer.trim());
+            controller.enqueue(new TextEncoder().encode(buffer.trim() + '\n'));
+          } catch {
+            // skip
+          }
+        }
 
         if (code !== 0) {
           controller.enqueue(new TextEncoder().encode(
