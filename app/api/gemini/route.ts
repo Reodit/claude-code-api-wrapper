@@ -1,17 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { log } from '@/lib/logger';
 import {
   FileAttachment,
   SavedFile,
   validateFiles,
   saveFilesToTemp,
-  buildFilePromptInstructions,
-  cleanupTempFiles,
 } from '@/lib/file-handler';
+import { spawnGeminiStream, collectGeminiStream } from '@/lib/gemini-spawn';
 
 /**
- * Gemini CLI API Wrapper
+ * Gemini CLI API Wrapper (Sync)
+ *
+ * Internally uses the same streaming spawn as /api/gemini/stream,
+ * but collects all events and returns a single JSON response.
  *
  * POST /api/gemini
  * Body: {
@@ -19,8 +20,11 @@ import {
  *   model?: string;       // 기본값: gemini-2.5-pro
  *   files?: FileAttachment[];
  *   yolo?: boolean;        // 도구 자동 승인 (기본값: true)
+ *   sandbox?: boolean;     // 도구 사용 금지
  * }
  */
+export const maxDuration = 1200; // 20분
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -29,11 +33,13 @@ export async function POST(request: NextRequest) {
       files,
       model,
       yolo = true,
+      sandbox = false,
     } = body as {
       prompt: string;
       files?: FileAttachment[];
       model?: string;
       yolo?: boolean;
+      sandbox?: boolean;
     };
 
     if (!prompt || typeof prompt !== 'string') {
@@ -53,163 +59,39 @@ export async function POST(request: NextRequest) {
       savedFiles = await saveFilesToTemp(files);
     }
 
-    // Gemini CLI 경로 감지
-    const possiblePaths = [
-      '/opt/homebrew/bin/gemini',
-      '/usr/local/bin/gemini',
-      'gemini',
-    ];
+    // Spawn stream and collect all events
+    const { stream } = spawnGeminiStream({
+      prompt,
+      model,
+      yolo,
+      sandbox,
+      savedFiles,
+    });
 
-    const geminiPath = possiblePaths.find(path =>
-      path === 'gemini' || existsSync(path)
-    ) || 'gemini';
+    const responseData = await collectGeminiStream(stream, model);
 
-    const args: string[] = ['--output-format', 'stream-json'];
-
-    // 모델 설정
-    if (model && typeof model === 'string') {
-      args.push('-m', model);
-    }
-
-    // yolo 모드 (도구 자동 승인)
-    if (yolo) {
-      args.push('-y');
-    }
-
-    // 프롬프트 구성
-    let augmentedPrompt = prompt;
-    if (savedFiles.length > 0) {
-      const fileInstructions = buildFilePromptInstructions(savedFiles);
-      augmentedPrompt = `${fileInstructions}\n\n${prompt}`;
-    }
-
-    args.push('-p', augmentedPrompt);
-
-    console.log(`Executing Gemini CLI: ${geminiPath} ${args.slice(0, -1).join(' ')}`);
-
-    try {
-      const startTime = Date.now();
-
-      const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(geminiPath, args, {
-          cwd: process.cwd(),
-          env: {
-            ...process.env,
-            PATH: process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
-            TERM: 'xterm-256color',
-            CLAUDECODE: '',
+    // 인증 에러 감지: collectStream은 throw하지 않고 { success: false, error } 반환
+    if (!responseData.success && responseData.error) {
+      const err = responseData.error;
+      if (
+        (err.includes('auth') && !err.includes('Loaded cached credentials')) ||
+        err.includes('not authenticated') ||
+        err.includes('login required')
+      ) {
+        return NextResponse.json(
+          {
+            error: 'Gemini CLI authentication required',
+            details: 'Run "gemini" in terminal first to complete Google OAuth login.',
           },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-
-        child.stdin.end();
-
-        let stdoutData = '';
-        let stderrData = '';
-
-        child.stdout.on('data', (data) => {
-          stdoutData += data.toString();
-        });
-
-        child.stderr.on('data', (data) => {
-          stderrData += data.toString();
-        });
-
-        const timeout = setTimeout(() => {
-          child.kill();
-          reject(new Error('Gemini request timed out'));
-        }, 600000); // 10분 타임아웃
-
-        child.on('close', (code, signal) => {
-          clearTimeout(timeout);
-          if (code === 0) {
-            resolve(stdoutData);
-          } else {
-            const errorMsg = `Process exited with code ${code}, signal ${signal}`;
-            const fullError = stderrData ? `${errorMsg}\nStderr: ${stderrData}` : errorMsg;
-            reject(new Error(fullError));
-          }
-        });
-
-        child.on('error', (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-      });
-
-      const durationMs = Date.now() - startTime;
-
-      // stream-json JSONL 파싱
-      const lines = output.split('\n');
-      let resultText = '';
-      let sessionId = '';
-      let usedModel = model || '';
-      let stats: Record<string, unknown> = {};
-      let hasError = false;
-      let errorMessage = '';
-      const events: Record<string, unknown>[] = [];
-
-      for (const line of lines) {
-        if (!line.trim() || line.startsWith('Loaded cached credentials') || line.startsWith('Skill conflict')) continue;
-        try {
-          const parsed = JSON.parse(line);
-          events.push(parsed);
-
-          if (parsed.type === 'init') {
-            sessionId = parsed.session_id || '';
-            usedModel = parsed.model || usedModel;
-          }
-          if (parsed.type === 'message' && parsed.role === 'assistant') {
-            resultText += parsed.content || '';
-          }
-          if (parsed.type === 'result') {
-            stats = parsed.stats || {};
-            hasError = parsed.status !== 'success';
-          }
-          if (parsed.type === 'error') {
-            hasError = true;
-            errorMessage = parsed.message || parsed.content || '';
-          }
-        } catch {
-          // non-JSON line, skip
-        }
-      }
-
-      return NextResponse.json({
-        success: !hasError,
-        provider: 'gemini',
-        result: resultText.trim(),
-        events,
-        metadata: {
-          session_id: sessionId,
-          model: usedModel || 'gemini-2.5-pro',
-          duration_ms: durationMs,
-          stats,
-          cost_usd: 0,
-        },
-        ...(hasError && { error: errorMessage }),
-        raw_output: output,
-      });
-
-    } finally {
-      if (savedFiles.length > 0) {
-        await cleanupTempFiles(savedFiles);
+          { status: 401 }
+        );
       }
     }
+
+    return NextResponse.json(responseData);
   } catch (error: unknown) {
-    console.error('Gemini API error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-    // 인증 에러 감지
-    if (errorMessage.includes('credentials') || errorMessage.includes('auth')) {
-      return NextResponse.json(
-        {
-          error: 'Gemini CLI authentication required',
-          details: 'Run "gemini" in terminal first to complete Google OAuth login.',
-        },
-        { status: 401 }
-      );
-    }
+    log('Gemini', 'ERROR', errorMessage);
 
     return NextResponse.json(
       { error: 'Failed to execute Gemini', details: errorMessage },
@@ -237,6 +119,7 @@ export async function GET() {
       files: 'FileAttachment[] (optional) - Attached files as base64',
       model: 'string (optional, default: gemini-2.5-pro)',
       yolo: 'boolean (optional, default: true) - Auto-approve tool usage',
+      sandbox: 'boolean (optional, default: false) - Disable tool usage',
     },
     note: 'Uses Gemini CLI stream-json output format for structured responses.',
   });

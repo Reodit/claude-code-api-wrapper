@@ -75,6 +75,9 @@ coverage/
 .windsurf/
 .zencoder/
 
+# Logs
+logs/
+
 # Temporary files
 /tmp/
 *.tmp

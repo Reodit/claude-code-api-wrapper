@@ -1,19 +1,18 @@
 import { NextRequest } from 'next/server';
-import { spawn } from 'child_process';
-import { existsSync } from 'fs';
 import {
   FileAttachment,
   SavedFile,
   validateFiles,
   saveFilesToTemp,
-  buildFilePromptInstructions,
   cleanupTempFiles,
 } from '@/lib/file-handler';
+import { spawnCodexStream } from '@/lib/codex-spawn';
+import { log, createStreamLogger } from '@/lib/logger';
 
 /**
  * Codex CLI Streaming API Wrapper
  *
- * Codex CLI의 --json JSONL 출력을 그대로 스트리밍합니다.
+ * POST /api/codex/stream
  */
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -21,19 +20,18 @@ export async function POST(request: NextRequest) {
     prompt,
     files,
     model,
-    sandboxMode = 'danger-full-access',
+    sandbox = 'read-only',
   } = body as {
     prompt: string;
     files?: FileAttachment[];
     model?: string;
-    sandboxMode?: string;
+    sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   };
 
   if (!prompt || typeof prompt !== 'string') {
     return new Response(JSON.stringify({ error: 'Prompt required' }), { status: 400 });
   }
 
-  // 파일 첨부 처리
   let savedFiles: SavedFile[] = [];
   if (files && Array.isArray(files) && files.length > 0) {
     const validationError = validateFiles(files);
@@ -43,130 +41,44 @@ export async function POST(request: NextRequest) {
     savedFiles = await saveFilesToTemp(files);
   }
 
-  // Codex CLI 경로 감지
-  const possiblePaths = [
-    '/opt/homebrew/bin/codex',
-    '/usr/local/bin/codex',
-    'codex',
-  ];
+  const { stream: rawStream, child } = spawnCodexStream({ prompt, model, sandbox, savedFiles });
+  const streamLog = createStreamLogger('codex');
+  const decoder = new TextDecoder();
 
-  const codexPath = possiblePaths.find(path =>
-    path === 'codex' || existsSync(path)
-  ) || 'codex';
-
-  const args: string[] = ['exec', '--json'];
-
-  if (sandboxMode) {
-    args.push('--sandbox', sandboxMode);
-  }
-
-  if (model && typeof model === 'string') {
-    args.push('-m', model);
-  }
-
-  let augmentedPrompt = prompt;
-  if (savedFiles.length > 0) {
-    const fileInstructions = buildFilePromptInstructions(savedFiles);
-    augmentedPrompt = `${fileInstructions}\n\n${prompt}`;
-  }
-
-  args.push(augmentedPrompt);
-
-  const stream = new ReadableStream({
-    start(controller) {
-      let isClosed = false;
-      const safeClose = () => {
-        if (!isClosed) {
-          isClosed = true;
-          controller.close();
+  const loggedStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = rawStream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          streamLog.logLine(decoder.decode(value, { stream: true }));
+          controller.enqueue(value);
         }
-      };
-
-      const child = spawn(codexPath, args, {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          PATH: process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
-          TERM: 'xterm-256color',
-          CLAUDECODE: '',
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      child.stdin.end();
-
-      let buffer = '';
-
-      child.stdout.on('data', (data) => {
-        buffer += data.toString();
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim()) {
-            try {
-              JSON.parse(line); // 유효성 검사
-              controller.enqueue(new TextEncoder().encode(line + '\n'));
-            } catch {
-              // 무시
-            }
-          }
-        }
-      });
-
-      child.stderr.on('data', (data) => {
-        console.error('Codex stderr:', data.toString());
-      });
-
-      const timeout = setTimeout(() => {
+      } catch (err) {
         child.kill();
-        controller.enqueue(new TextEncoder().encode(
-          JSON.stringify({ type: 'error', message: 'Request timed out' }) + '\n'
-        ));
-        safeClose();
+        const msg = err instanceof Error ? err.message : 'Stream error';
+        log('Codex', 'ERROR', msg);
+        const errLine = JSON.stringify({ type: 'error', message: msg }) + '\n';
+        streamLog.logLine(errLine);
+        controller.enqueue(new TextEncoder().encode(errLine));
+      } finally {
+        controller.close();
         if (savedFiles.length > 0) {
-          cleanupTempFiles(savedFiles).catch(console.error);
+          await cleanupTempFiles(savedFiles);
         }
-      }, 1200000); // 20분
-
-      child.on('close', (code) => {
-        clearTimeout(timeout);
-
-        if (buffer.trim()) {
-          try {
-            JSON.parse(buffer);
-            controller.enqueue(new TextEncoder().encode(buffer + '\n'));
-          } catch {
-            // 무시
-          }
-        }
-
-        if (code !== 0) {
-          controller.enqueue(new TextEncoder().encode(
-            JSON.stringify({ type: 'error', message: `Process exited with code ${code}` }) + '\n'
-          ));
-        }
-        safeClose();
-        if (savedFiles.length > 0) {
-          cleanupTempFiles(savedFiles).catch(console.error);
-        }
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(timeout);
-        controller.enqueue(new TextEncoder().encode(
-          JSON.stringify({ type: 'error', message: err.message }) + '\n'
-        ));
-        safeClose();
-        if (savedFiles.length > 0) {
-          cleanupTempFiles(savedFiles).catch(console.error);
-        }
-      });
+      }
+    },
+    cancel() {
+      child.kill();
+      streamLog.logLine(JSON.stringify({ type: 'cancel', message: 'Client disconnected' }) + '\n');
+      if (savedFiles.length > 0) {
+        cleanupTempFiles(savedFiles).catch(console.error);
+      }
     },
   });
 
-  return new Response(stream, {
+  return new Response(loggedStream, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
       'Transfer-Encoding': 'chunked',
