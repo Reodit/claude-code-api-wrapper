@@ -162,7 +162,7 @@ function buildArgs(body: ClaudeRequestBody, augmentedPrompt: string): string[] {
     '--output-format', 'stream-json',
     '--verbose',
     '--include-partial-messages',
-    '--model', model || 'claude-opus-4-5-20251101',
+    '--model', model || 'claude-opus-4-6-20260205',
     '--dangerously-skip-permissions',
   ];
 

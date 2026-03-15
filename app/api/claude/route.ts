@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     message: 'Claude Code API Wrapper',
-    model: 'claude-opus-4-5-20251101 (default, configurable)',
+    model: 'claude-opus-4-6-20260205 (default, configurable)',
     mcp_servers: MCP_SERVERS.map(s => s.name),
     default_agents: Object.keys(DEFAULT_AGENTS),
     usage: 'POST /api/claude with { "prompt": "your prompt here" }',
