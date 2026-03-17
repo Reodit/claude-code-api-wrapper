@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
+import { tmpdir } from 'os';
 import { log } from '@/lib/logger';
 import {
   SavedFile,
@@ -51,7 +52,7 @@ export function spawnGeminiStream(options: GeminiSpawnOptions): { stream: Readab
   } = options;
 
   const geminiPath = findGeminiPath();
-  const args: string[] = ['--output-format', 'stream-json'];
+  const args: string[] = ['--output-format', 'stream-json', '--include-directories', tmpdir()];
 
   if (model && typeof model === 'string') {
     args.push('-m', model);
