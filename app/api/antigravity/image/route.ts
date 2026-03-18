@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  getValidAccessToken,
   generateImage,
-  refreshAccessToken,
-  loadCredentials,
+  isAuthenticated,
   type ImagePart,
 } from "@/lib/antigravity";
 
@@ -28,19 +26,7 @@ interface RequestBody {
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as RequestBody;
-
-    if (!body.prompt || typeof body.prompt !== "string") {
-      return NextResponse.json(
-        { success: false, images: [], error: "prompt is required" },
-        { status: 400 }
-      );
-    }
-
-    let accessToken: string;
-    try {
-      accessToken = await getValidAccessToken();
-    } catch {
+    if (!isAuthenticated()) {
       return NextResponse.json(
         {
           success: false,
@@ -51,55 +37,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Attempt generation, with automatic retry on 401
-    try {
-      const images = await generateImage(
-        accessToken,
-        body.prompt,
-        body.image,
-        body.referenceImages,
-        body.aspectRatio ?? "1:1"
-      );
+    const body = (await request.json()) as RequestBody;
 
-      return NextResponse.json({ success: true, images });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-
-      // If 401, try refreshing the token once and retrying
-      if (message.includes("401")) {
-        const creds = loadCredentials();
-        if (creds?.refresh_token) {
-          try {
-            const refreshed = await refreshAccessToken(creds.refresh_token);
-            const images = await generateImage(
-              refreshed.access_token,
-              body.prompt,
-              body.image,
-              body.referenceImages,
-              body.aspectRatio ?? "1:1"
-            );
-            return NextResponse.json({ success: true, images });
-          } catch (retryErr) {
-            const retryMsg =
-              retryErr instanceof Error ? retryErr.message : String(retryErr);
-            return NextResponse.json(
-              { success: false, images: [], error: retryMsg },
-              { status: 502 }
-            );
-          }
-        }
-      }
-
+    if (!body.prompt || typeof body.prompt !== "string") {
       return NextResponse.json(
-        { success: false, images: [], error: message },
-        { status: 502 }
+        { success: false, images: [], error: "prompt is required" },
+        { status: 400 }
       );
     }
+
+    const result = await generateImage({
+      prompt: body.prompt,
+      image: body.image,
+      referenceImages: body.referenceImages,
+      aspectRatio: body.aspectRatio ?? "1:1",
+    });
+
+    return NextResponse.json({ success: true, images: result.images });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const status = message.includes("401") ? 401 : 502;
     return NextResponse.json(
       { success: false, images: [], error: message },
-      { status: 500 }
+      { status }
     );
   }
 }

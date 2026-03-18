@@ -6,10 +6,8 @@ import * as crypto from "crypto";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const CLIENT_ID =
-  process.env.ANTIGRAVITY_CLIENT_ID || "default-client-id";
-const CLIENT_SECRET =
-  process.env.ANTIGRAVITY_CLIENT_SECRET || "default-client-secret";
+const CLIENT_ID = process.env.ANTIGRAVITY_CLIENT_ID || "";
+const CLIENT_SECRET = process.env.ANTIGRAVITY_CLIENT_SECRET || "";
 const OAUTH_PORT = 51122;
 const REDIRECT_URI = `http://127.0.0.1:${OAUTH_PORT}/oauth-callback`;
 const SCOPES = [
@@ -21,23 +19,29 @@ const SCOPES = [
 ];
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GENERATE_ENDPOINTS = [
-  "https://daily-cloudcode-pa.sandbox.googleapis.com",
-  "https://autopush-cloudcode-pa.sandbox.googleapis.com",
-];
+const GENERATE_ENDPOINT =
+  "https://cloudcode-pa.googleapis.com/v1internal:generateContent";
+const MODELS_ENDPOINT =
+  "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+const LOAD_CODE_ASSIST_ENDPOINT =
+  "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const HEADERS: Record<string, string> = {
   "User-Agent": "antigravity/1.15.8 darwin/arm64",
   "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
   "Client-Metadata":
     '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
 };
-const MODEL = "gemini-3-pro-image";
 const AUTH_FILE = path.join(
   os.homedir(),
   ".config",
   "artifex-mcp",
   "auth.json"
 );
+
+// ── Cached values ────────────────────────────────────────────────────────────
+
+let cachedProjectId: string | null = null;
+let cachedImageModel: string | null = null;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -51,6 +55,17 @@ interface Credentials {
 export interface ImagePart {
   data: string;
   mimeType: string;
+}
+
+export interface GenerateImageOptions {
+  prompt: string;
+  image?: ImagePart;
+  referenceImages?: ImagePart[];
+  aspectRatio?: string; // default "1:1"
+}
+
+export interface GenerateImageResult {
+  images: ImagePart[];
 }
 
 // ── Credential management ──────────────────────────────────────────────────────
@@ -185,7 +200,9 @@ export async function runOAuthFlow(): Promise<Credentials> {
 
         if (!tokenRes.ok) {
           const text = await tokenRes.text();
-          throw new Error(`Token exchange failed (${tokenRes.status}): ${text}`);
+          throw new Error(
+            `Token exchange failed (${tokenRes.status}): ${text}`
+          );
         }
 
         const data = await tokenRes.json();
@@ -231,7 +248,9 @@ export async function runOAuthFlow(): Promise<Credentials> {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const open = require("open") as typeof import("open");
-        (open as { default: (url: string) => Promise<unknown> }).default(authUrl);
+        (open as { default: (url: string) => Promise<unknown> }).default(
+          authUrl
+        );
       } catch {
         // Fallback: use macOS open command
         try {
@@ -251,28 +270,96 @@ export async function runOAuthFlow(): Promise<Credentials> {
   });
 }
 
+// ── Fetch available image models ────────────────────────────────────────────
+
+export async function fetchAvailableImageModels(
+  accessToken: string
+): Promise<string[]> {
+  const res = await fetch(MODELS_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      ...HEADERS,
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`fetchAvailableModels failed (${res.status}): ${text}`);
+  }
+
+  const data = await res.json();
+  const modelIds: string[] = data.imageGenerationModelIds || [];
+  return modelIds;
+}
+
+// ── Fetch project ID ────────────────────────────────────────────────────────
+
+export async function fetchProjectId(accessToken: string): Promise<string> {
+  const res = await fetch(LOAD_CODE_ASSIST_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      ...HEADERS,
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`loadCodeAssist failed (${res.status}): ${text}`);
+  }
+
+  const data = await res.json();
+  const projectId = data.project || data.projectId;
+  if (!projectId) {
+    throw new Error(
+      "Could not determine project ID from loadCodeAssist response"
+    );
+  }
+  return projectId;
+}
+
 // ── Image generation ───────────────────────────────────────────────────────────
 
 export async function generateImage(
-  accessToken: string,
-  prompt: string,
-  inputImage?: ImagePart,
-  referenceImages?: ImagePart[],
-  aspectRatio: string = "1:1"
-): Promise<ImagePart[]> {
+  options: GenerateImageOptions
+): Promise<GenerateImageResult> {
+  const { prompt, image, referenceImages, aspectRatio = "1:1" } = options;
+
+  // 1. Load credentials, get valid access token
+  let accessToken = await getValidAccessToken();
+
+  // 2. Fetch project ID if not cached
+  if (!cachedProjectId) {
+    cachedProjectId = await fetchProjectId(accessToken);
+  }
+
+  // 3. Fetch available image model if not cached
+  if (!cachedImageModel) {
+    const models = await fetchAvailableImageModels(accessToken);
+    if (models.length === 0) {
+      throw new Error("No image generation models available");
+    }
+    // Prefer gemini-3.1-flash-image if available, otherwise use first
+    cachedImageModel =
+      models.find((m) => m.includes("flash-image")) || models[0];
+  }
+
+  // 4. Build request parts
   const parts: Array<Record<string, unknown>> = [];
 
-  // Add input image if provided
-  if (inputImage) {
+  if (image) {
     parts.push({
-      inlineData: { mimeType: inputImage.mimeType, data: inputImage.data },
+      inlineData: { mimeType: image.mimeType, data: image.data },
     });
   }
 
-  // Add prompt
   parts.push({ text: prompt });
 
-  // Add reference images
   if (referenceImages?.length) {
     parts.push({
       text: "\n\nBelow are reference images of furniture products to place in the room:",
@@ -284,9 +371,10 @@ export async function generateImage(
     }
   }
 
+  // 5. Build request body
   const body = {
-    project: "artifex-mcp",
-    model: MODEL,
+    project: cachedProjectId,
+    model: cachedImageModel,
     request: {
       contents: [{ role: "user", parts }],
       generationConfig: {
@@ -307,61 +395,64 @@ export async function generateImage(
         { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" },
       ],
     },
-    requestType: "agent",
-    userAgent: "artifex",
-    requestId: `agent-${crypto.randomUUID()}`,
+    requestType: "image_gen",
+    userAgent: "antigravity",
+    requestId: `image_gen/${Date.now()}/${crypto.randomUUID()}/12`,
   };
 
-  let lastError: Error | null = null;
+  // 6. Call the API (with auto-retry on 401)
+  const callApi = async (token: string): Promise<GenerateImageResult> => {
+    const response = await fetch(GENERATE_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        ...HEADERS,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
 
-  for (const endpoint of GENERATE_ENDPOINTS) {
-    try {
-      const response = await fetch(
-        `${endpoint}/v1internal:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
-            ...HEADERS,
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(120_000),
+    if (response.status === 429) {
+      throw new Error("Rate limit exceeded");
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`API error (${response.status}): ${text}`);
+    }
+
+    const data = await response.json();
+    const responseData = data.response || data;
+    const images: ImagePart[] = [];
+
+    for (const candidate of responseData.candidates || []) {
+      for (const part of candidate.content?.parts || []) {
+        if (part.inlineData?.data) {
+          images.push({
+            data: part.inlineData.data,
+            mimeType: part.inlineData.mimeType,
+          });
         }
-      );
-
-      if (response.status === 429) {
-        throw new Error("Rate limit exceeded");
-      }
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`API error (${response.status}): ${text}`);
-      }
-
-      const data = await response.json();
-      const responseData = data.response || data;
-      const images: ImagePart[] = [];
-
-      for (const candidate of responseData.candidates || []) {
-        for (const part of candidate.content.parts) {
-          if (part.inlineData?.data) {
-            images.push({
-              data: part.inlineData.data,
-              mimeType: part.inlineData.mimeType,
-            });
-          }
-        }
-      }
-
-      return images;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      // If not the last endpoint, try the next one
-      if (endpoint !== GENERATE_ENDPOINTS[GENERATE_ENDPOINTS.length - 1]) {
-        continue;
       }
     }
-  }
 
-  throw lastError ?? new Error("All endpoints failed");
+    return { images };
+  };
+
+  // 7. Execute with 401 retry
+  try {
+    return await callApi(accessToken);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("401")) {
+      // Refresh token and retry once
+      const creds = loadCredentials();
+      if (creds?.refresh_token) {
+        const refreshed = await refreshAccessToken(creds.refresh_token);
+        accessToken = refreshed.access_token;
+        return await callApi(accessToken);
+      }
+    }
+    throw err;
+  }
 }

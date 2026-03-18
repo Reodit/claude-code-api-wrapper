@@ -1,15 +1,38 @@
 import { NextResponse } from "next/server";
 import {
   isAuthenticated,
+  loadCredentials,
   runOAuthFlow,
   deleteCredentials,
+  getValidAccessToken,
+  fetchAvailableImageModels,
 } from "@/lib/antigravity";
 
 /**
- * GET /api/antigravity/auth — Check authentication status
+ * GET /api/antigravity/auth — Check authentication status and current tier
  */
 export async function GET() {
-  return NextResponse.json({ authenticated: isAuthenticated() });
+  const authenticated = isAuthenticated();
+  const result: Record<string, unknown> = { authenticated };
+
+  if (authenticated) {
+    try {
+      const accessToken = await getValidAccessToken();
+      const models = await fetchAvailableImageModels(accessToken);
+      result.availableModels = models;
+      result.tier = models.length > 0 ? "image_gen" : "basic";
+    } catch {
+      result.tier = "unknown";
+      result.availableModels = [];
+    }
+
+    const creds = loadCredentials();
+    if (creds?.expires_at) {
+      result.expiresAt = creds.expires_at;
+    }
+  }
+
+  return NextResponse.json(result);
 }
 
 /**
@@ -25,7 +48,10 @@ export async function POST() {
     }
 
     await runOAuthFlow();
-    return NextResponse.json({ success: true, message: "Authentication complete" });
+    return NextResponse.json({
+      success: true,
+      message: "Authentication complete",
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
