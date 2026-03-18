@@ -212,7 +212,113 @@ export async function getValidAccessToken(): Promise<string> {
   return refreshed.access_token;
 }
 
-// ── OAuth flow ─────────────────────────────────────────────────────────────────
+// ── Frontend-driven OAuth ────────────────────────────────────────────────────
+
+export function buildOAuthUrl(): { url: string; state: string } {
+  const state = crypto.randomBytes(16).toString("hex");
+
+  // The callback URL points to our own API route
+  const port = process.env.PORT || "3000";
+  const callbackUrl = `http://localhost:${port}/api/antigravity/auth/callback`;
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID(),
+    response_type: "code",
+    redirect_uri: callbackUrl,
+    scope: SCOPES.join(" "),
+    access_type: "offline",
+    prompt: "consent",
+    state,
+  });
+
+  return {
+    url: `${GOOGLE_AUTH_URL}?${params.toString()}`,
+    state,
+  };
+}
+
+export async function exchangeCodeForTokens(
+  code: string
+): Promise<{ credentials: Credentials; email: string; projectId: string }> {
+  const port = process.env.PORT || "3000";
+  const callbackUrl = `http://localhost:${port}/api/antigravity/auth/callback`;
+
+  // 1. Exchange authorization code for tokens
+  const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: CLIENT_ID(),
+      client_secret: CLIENT_SECRET(),
+      redirect_uri: callbackUrl,
+      grant_type: "authorization_code",
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const text = await tokenRes.text();
+    throw new Error(`Token exchange failed (${tokenRes.status}): ${text}`);
+  }
+
+  const data = await tokenRes.json();
+  const creds: Credentials = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    token_type: data.token_type || "Bearer",
+    expires_at: Date.now() + (data.expires_in ?? 3600) * 1000,
+  };
+
+  // 2. Fetch user email from Google userinfo
+  let email = "";
+  try {
+    const userinfoRes = await fetch(
+      "https://www.googleapis.com/oauth2/v2/userinfo",
+      { headers: { Authorization: `Bearer ${creds.access_token}` } }
+    );
+    if (userinfoRes.ok) {
+      const userinfo = await userinfoRes.json();
+      email = userinfo.email || "";
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // 3. Fetch project ID via loadCodeAssist
+  let projectId = "";
+  try {
+    projectId = await fetchProjectId(creds.access_token);
+  } catch {
+    /* ignore — projectId will be fetched later when needed */
+  }
+
+  // 4. Save credentials with all metadata
+  const { id: clientId, secret: clientSecret } = getClientCredentials();
+  const fullData: Record<string, unknown> = {
+    // snake_case (Credentials interface)
+    access_token: creds.access_token,
+    refresh_token: creds.refresh_token,
+    token_type: creds.token_type,
+    expires_at: creds.expires_at,
+    // camelCase (backward compatibility)
+    accessToken: creds.access_token,
+    refreshToken: creds.refresh_token,
+    tokenType: creds.token_type,
+    expiresAt: creds.expires_at,
+    // Metadata
+    clientId,
+    clientSecret,
+    projectId,
+    email,
+  };
+  const dir = path.dirname(AUTH_FILE);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(fullData, null, 2), "utf-8");
+
+  return { credentials: creds, email, projectId };
+}
+
+// ── OAuth flow (legacy, server-side — kept for backward compatibility) ───────
 
 export async function runOAuthFlow(): Promise<Credentials> {
   return new Promise<Credentials>((resolve, reject) => {
@@ -371,7 +477,13 @@ export async function fetchProjectId(accessToken: string): Promise<string> {
       Authorization: `Bearer ${accessToken}`,
       ...HEADERS,
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify({
+      metadata: {
+        ideType: "IDE_UNSPECIFIED",
+        platform: "PLATFORM_UNSPECIFIED",
+        pluginType: "GEMINI",
+      },
+    }),
   });
 
   if (!res.ok) {

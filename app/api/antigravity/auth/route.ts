@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import {
   isAuthenticated,
   loadCredentials,
-  runOAuthFlow,
+  buildOAuthUrl,
   deleteCredentials,
   getValidAccessToken,
   fetchAvailableImageModels,
@@ -36,7 +36,7 @@ export async function GET() {
 }
 
 /**
- * POST /api/antigravity/auth — Trigger OAuth flow (opens browser)
+ * POST /api/antigravity/auth — Return OAuth URL for frontend-driven flow
  */
 export async function POST() {
   try {
@@ -47,11 +47,8 @@ export async function POST() {
       });
     }
 
-    await runOAuthFlow();
-    return NextResponse.json({
-      success: true,
-      message: "Authentication complete",
-    });
+    const { url, state } = buildOAuthUrl();
+    return NextResponse.json({ success: true, authUrl: url, state });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
