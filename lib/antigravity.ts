@@ -4,10 +4,52 @@ import * as fs from "fs";
 import * as http from "http";
 import * as crypto from "crypto";
 
+// ── Load .env manually (Next.js production may not load it) ─────────────────
+
+function loadEnvFile(): Record<string, string> {
+  const envVars: Record<string, string> = {};
+  const envPaths = [
+    path.join(process.cwd(), '.env'),
+    path.join(process.cwd(), '..', '.env'),
+  ];
+  for (const envPath of envPaths) {
+    try {
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8');
+        for (const line of content.split('\n')) {
+          const match = line.match(/^([^#=]+)=(.*)$/);
+          if (match) envVars[match[1].trim()] = match[2].trim();
+        }
+      }
+    } catch { /* */ }
+  }
+  return envVars;
+}
+
+const _env = loadEnvFile();
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const CLIENT_ID = process.env.ANTIGRAVITY_CLIENT_ID || "";
-const CLIENT_SECRET = process.env.ANTIGRAVITY_CLIENT_SECRET || "";
+const AUTH_FILE = path.join(os.homedir(), ".config", "artifex-mcp", "auth.json");
+
+// Read credentials lazily at runtime (not at module load / build time)
+function getClientCredentials(): { id: string; secret: string } {
+  // 1. env vars (use dynamic access to prevent Next.js build-time inlining)
+  const env = process["env"];
+  let id = env["ANTIGRAVITY_CLIENT_ID"] || _env.ANTIGRAVITY_CLIENT_ID || "";
+  let secret = env["ANTIGRAVITY_CLIENT_SECRET"] || _env.ANTIGRAVITY_CLIENT_SECRET || "";
+  if (id && secret) return { id, secret };
+  // 2. auth.json
+  try {
+    const authData = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+    id = authData.clientId || id;
+    secret = authData.clientSecret || secret;
+  } catch { /* */ }
+  return { id, secret };
+}
+// Use getter functions instead of constants (Next.js build may inline empty process.env values)
+const CLIENT_ID = () => getClientCredentials().id;
+const CLIENT_SECRET = () => getClientCredentials().secret;
 const OAUTH_PORT = 51122;
 const REDIRECT_URI = `http://127.0.0.1:${OAUTH_PORT}/oauth-callback`;
 const SCOPES = [
@@ -31,12 +73,6 @@ const HEADERS: Record<string, string> = {
   "Client-Metadata":
     '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
 };
-const AUTH_FILE = path.join(
-  os.homedir(),
-  ".config",
-  "artifex-mcp",
-  "auth.json"
-);
 
 // ── Cached values ────────────────────────────────────────────────────────────
 
@@ -74,7 +110,14 @@ export function loadCredentials(): Credentials | null {
   try {
     if (!fs.existsSync(AUTH_FILE)) return null;
     const raw = fs.readFileSync(AUTH_FILE, "utf-8");
-    return JSON.parse(raw) as Credentials;
+    const data = JSON.parse(raw);
+    // Normalize field names (auth.json uses camelCase, Credentials uses snake_case)
+    return {
+      access_token: data.access_token || data.accessToken || "",
+      refresh_token: data.refresh_token || data.refreshToken || "",
+      token_type: data.token_type || data.tokenType || "Bearer",
+      expires_at: data.expires_at || data.expiresAt,
+    } as Credentials;
   } catch {
     return null;
   }
@@ -83,7 +126,15 @@ export function loadCredentials(): Credentials | null {
 export function saveCredentials(creds: Credentials): void {
   const dir = path.dirname(AUTH_FILE);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(creds, null, 2), "utf-8");
+  // Merge with existing data to preserve clientId, clientSecret, projectId, email
+  let existing: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(AUTH_FILE)) {
+      existing = JSON.parse(fs.readFileSync(AUTH_FILE, "utf-8"));
+    }
+  } catch { /* */ }
+  const merged = { ...existing, ...creds };
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(merged, null, 2), "utf-8");
 }
 
 export function deleteCredentials(): void {
@@ -103,12 +154,27 @@ export function isAuthenticated(): boolean {
 export async function refreshAccessToken(
   refreshToken: string
 ): Promise<Credentials> {
+  // Read credentials directly from auth.json every time (Next.js may inline env vars at build)
+  let cid = CLIENT_ID();
+  let csecret = CLIENT_SECRET();
+  if (!cid || !csecret) {
+    try {
+      const raw = fs.readFileSync(
+        path.join(os.homedir(), ".config", "artifex-mcp", "auth.json"),
+        "utf8"
+      );
+      const d = JSON.parse(raw);
+      cid = d.clientId || cid;
+      csecret = d.clientSecret || csecret;
+    } catch { /* */ }
+  }
+
   const res = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+      client_id: cid,
+      client_secret: csecret,
       refresh_token: refreshToken,
       grant_type: "refresh_token",
     }),
@@ -116,7 +182,7 @@ export async function refreshAccessToken(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Token refresh failed (${res.status}): ${text}`);
+    throw new Error(`Token refresh failed (${res.status}): ${text} [clientId=${cid ? 'set' : 'EMPTY'}]`);
   }
 
   const data = await res.json();
@@ -191,8 +257,8 @@ export async function runOAuthFlow(): Promise<Credentials> {
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             code,
-            client_id: CLIENT_ID,
-            client_secret: CLIENT_SECRET,
+            client_id: CLIENT_ID(),
+            client_secret: CLIENT_SECRET(),
             redirect_uri: REDIRECT_URI,
             grant_type: "authorization_code",
           }),
@@ -234,7 +300,7 @@ export async function runOAuthFlow(): Promise<Credentials> {
 
     server.listen(OAUTH_PORT, "127.0.0.1", async () => {
       const params = new URLSearchParams({
-        client_id: CLIENT_ID,
+        client_id: CLIENT_ID(),
         redirect_uri: REDIRECT_URI,
         response_type: "code",
         scope: SCOPES.join(" "),
@@ -314,8 +380,18 @@ export async function fetchProjectId(accessToken: string): Promise<string> {
   }
 
   const data = await res.json();
-  const projectId = data.project || data.projectId;
+  const projectId =
+    (typeof data.cloudaicompanionProject === "string"
+      ? data.cloudaicompanionProject
+      : data.cloudaicompanionProject?.id) ||
+    data.project ||
+    data.projectId;
   if (!projectId) {
+    // Fallback: read from auth.json
+    try {
+      const authData = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+      if (authData.projectId) return authData.projectId;
+    } catch { /* */ }
     throw new Error(
       "Could not determine project ID from loadCodeAssist response"
     );
